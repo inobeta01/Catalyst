@@ -1,0 +1,11 @@
+{
+  "name": "code-review-standard",
+  "description": "Standard code review scenario",
+  "input": {
+    "diff": "diff --git a/src/handler.py b/src/handler.py\n+ session = Session()\n- session = Session(user_id)",
+    "repo": "user-service"
+  },
+  "expected_output": {
+    "issues": ["session not initialized with user_id"]
+  }
+}

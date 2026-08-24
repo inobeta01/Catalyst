@@ -1,0 +1,11 @@
+name: identifier-regex
+patterns:
+  - name: ssn
+    pattern: "\\b\\d{3}-\\d{2}-\\d{4}\\b"
+    replacement: "[REDACTED-SSN]"
+  - name: credit-card
+    pattern: "\\b(?:\\d[ -]*?){13,16}\\b"
+    replacement: "[REDACTED-CARD]"
+  - name: phone
+    pattern: "\\b\\d{3}-\\d{3}-\\d{4}\\b"
+    replacement: "[REDACTED-PHONE]"

@@ -1,0 +1,5 @@
+name: prompt-template-drift
+description: "The system prompt or task prompt has drifted from the original, causing the agent to misinterpret its task."
+category: prompt
+severity: high
+trigger: replace_prompt_segment

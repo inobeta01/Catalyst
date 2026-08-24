@@ -1,0 +1,5 @@
+name: noise-tolerance
+description: "Plugin should not flag genuine real-tool jitter as a regression. Tests whether redaction pipeline preserves enough signal while masking noise."
+category: observability
+severity: low
+trigger: noise_tolerance_check

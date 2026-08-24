@@ -1,0 +1,5 @@
+name: premature-termination
+description: "The agent stops before completing the task, declaring success prematurely."
+category: behavior
+severity: high
+trigger: induce_premature_termination

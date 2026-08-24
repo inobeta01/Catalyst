@@ -1,0 +1,2 @@
+[console_scripts]
+catalyst = cli.catalyst:main

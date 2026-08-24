@@ -1,0 +1,45 @@
+
+version: "3.8"
+
+services:
+  phoenix:
+    # Official Arize Phoenix image
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "6006:6006"
+    environment:
+      - PHOENIX_API_KEY=${PHOENIX_API_KEY}
+    volumes:
+      - phoenix-data:/app/data
+
+  agentops:
+    # Official AgentOps image (placeholder – replace with actual tag if needed)
+    image: agentops/agentops:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - AGENTOPS_API_KEY=${AGENTOPS_API_KEY}
+
+  langgraph:
+    # Build the LangGraph workload from the local directory
+    build: ./workload
+    depends_on:
+      - phoenix
+      - agentops
+    environment:
+      - PHOENIX_HOST=http://phoenix:6006
+      - AGENTOPS_HOST=http://agentops:8000
+      - SANDBOX_TYPE=${SANDBOX_TYPE}
+      - SANDBOX_API_KEY=${SANDBOX_API_KEY}
+      - SANDBOX_BASE_URL=${SANDBOX_BASE_URL}
+      - AGENTOPS_API_KEY=${AGENTOPS_API_KEY}
+
+  # Optional sandbox service – replace with your chosen runtime (e2b, Docker, etc.)
+  sandbox:
+    image: your-sandbox-image:latest
+    environment:
+      - SANDBOX_API_KEY=${SANDBOX_API_KEY}
+    # Expose ports or mount volumes as required by the sandbox implementation
+
+volumes:
+  phoenix-data:

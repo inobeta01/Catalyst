@@ -1,0 +1,5 @@
+name: retry-storms
+description: "The agent repeatedly retries the same failing action without progressing, consuming tokens and time."
+category: behavior
+severity: medium
+trigger: induce_retry_storm

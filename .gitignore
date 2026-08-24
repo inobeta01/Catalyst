@@ -1,0 +1,40 @@
+# Instrumentation changes – OpenInference spans now emitted
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docker
+*.pid
+*.raw
+docker-compose.override.yml
+
+# Phoenix data
+phoenix-data/
+
+# Corpus — raw real-world data never committed
+corpus/raw/

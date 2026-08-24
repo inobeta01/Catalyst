@@ -1,0 +1,19 @@
+# catalyst/failure-modes/prompt-template-drift.yaml
+id: prompt-template-drift
+description: A prompt template segment is swapped, simulating silent prompt‑version drift.
+trigger:
+  agent: brief-writer
+  perturbation: replace_prompt_segment
+  args:
+    segment_id: closing-cta
+    replacement_text: "Buy now."
+workload_inputs: fixtures/brief-writer/standard.json   # redacted, real‑world‑derived
+control_inputs: fixtures/brief-writer/standard.json    # no perturbation, replayed real tool responses
+expected:
+  perturbed_run:
+    verdict_mode: fail
+    must_match_check: "prompt_drift_detected"
+  control_run:
+    verdict_mode: pass
+    must_not_match_check: "prompt_drift_detected"
+realism_bar: prompt‑version drift is the canonical regression mode (observed in incident logs)

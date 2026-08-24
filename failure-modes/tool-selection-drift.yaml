@@ -1,0 +1,5 @@
+name: tool-selection-drift
+description: "The agent selects the wrong tool for the task, either due to prompt confusion or tool availability changes."
+category: tool-use
+severity: high
+trigger: force_tool_misroute

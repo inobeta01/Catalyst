@@ -1,0 +1,13 @@
+{
+  "name": "brief-writer-standard",
+  "description": "Standard brief writing scenario",
+  "input": {
+    "issue": "Implement caching for API responses",
+    "context": "Current API calls are slow under load"
+  },
+  "expected_output": {
+    "title": "Implement Response Caching for API",
+    "summary": "Add Redis-backed caching to reduce API latency under load",
+    "approach": "Introduce cache layer with TTL eviction"
+  }
+}

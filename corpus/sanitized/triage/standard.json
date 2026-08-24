@@ -1,0 +1,12 @@
+{
+  "name": "triage-standard",
+  "description": "Standard triage scenario",
+  "input": {
+    "issue": "Fix memory leak in user session handler",
+    "priority": "high"
+  },
+  "expected_output": {
+    "classification": "bug",
+    "assignee": "backend"
+  }
+}
