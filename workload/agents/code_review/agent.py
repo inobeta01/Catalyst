@@ -1,69 +1,140 @@
-"""Code review agent: performs multi-step PR review with tool calls and multi‑LLM reasoning via FreeLLM API.
+"""Code review agent: review a PR diff end-to-end.
+
+Three LangGraph nodes, each backed by a concrete Gemini model:
+
+    fetch_pr -> review_chunks -> aggregate_review
+
+Step contracts:
+- ``fetch_pr``        : tool call, no LLM
+- ``review_chunks``   (gemini-1.5-pro):  one review per diff chunk, severity-tagged
+- ``aggregate_review``(gemini-1.5-pro):  final verdict + blocker list
 """
+import re
+from typing import Annotated, Dict, List, Optional, TypedDict
+
 from langgraph.graph import StateGraph
-from typing import TypedDict, Optional, List, Annotated
 from langgraph.graph.message import add_messages
-from workload.prompts.code_review import CODE_REVIEW_PROMPT
+
 from workload.llm import safe_llm_call
+from workload.prompts.code_review import CODE_REVIEW_PROMPT
 from workload.tools import fetch_pr_data, run_code_analysis
+
+
+_SEVERITY_RE = re.compile(r"\b(info|warning|error)\b", re.IGNORECASE)
+_VERDICT_RE = re.compile(r"\b(approve|request-changes|comment)\b", re.IGNORECASE)
+
 
 class CodeReviewState(TypedDict):
     messages: Annotated[List, add_messages]
     pr_id: Optional[str]
     pr_description: Optional[str]
     diffs: Optional[List[str]]
-    chunk_reviews: Optional[List[dict]]
+    chunk_reviews: Optional[List[Dict]]
     final_verdict: Optional[str]
+    blocker_count: Optional[int]
     trace_span_kind: Optional[str]
 
+
+_CHUNK_PROMPT = (
+    "Review this diff chunk. Reply with exactly three lines:\n"
+    "Severity: <info|warning|error>\n"
+    "Comment: <one sentence, max 25 words>\n"
+    "Confidence: <low|medium|high>\n\n"
+    "Diff chunk:\n{chunk}\n\n"
+    "Static analysis findings:\n{findings}\n"
+)
+
+
+_AGGREGATE_PROMPT = (
+    "Summarize the per-chunk PR reviews below. Reply with exactly four lines:\n"
+    "Verdict: <approve|request-changes|comment>\n"
+    "Blockers: <integer count of severity=error chunks>\n"
+    "Highlights: <one sentence>\n"
+    "Action: <single concrete next step, max 15 words>\n\n"
+    "Chunk reviews:\n{reviews}\n"
+)
+
+
+def _extract_severity(text: str) -> str:
+    match = _SEVERITY_RE.search(text)
+    return match.group(1).lower() if match else "info"
+
+
+def _extract_verdict(text: str) -> str:
+    match = _VERDICT_RE.search(text)
+    return match.group(1).lower() if match else "comment"
+
+
 def fetch_pr(state: CodeReviewState) -> CodeReviewState:
-    """Step 1 – Get PR metadata and raw diffs via a tool call."""
+    """Step 1 — fetch PR metadata + diff chunks via the PR tool."""
     pr_id = state.get("pr_id", "unknown")
     data = fetch_pr_data(pr_id)
     return {
         **state,
         "pr_description": data.get("title"),
-        "diffs": data.get("diff_chunks"),
+        "diffs": data.get("diff_chunks") or [],
         "trace_span_kind": "code_review.fetch_pr",
     }
 
+
 def review_chunks(state: CodeReviewState) -> CodeReviewState:
-    """Step 2 – Review each diff chunk with a dedicated LLM (Claude 3.5 Sonnet).
-    Each chunk can also invoke a static analysis tool for deeper insight.
-    """
+    """Step 2 — gemini-1.5-pro reviews each diff chunk with static analysis."""
     diffs = state.get("diffs", [])
-    chunk_reviews = []
+    chunk_reviews: List[Dict] = []
+
     for chunk in diffs:
-        # Run static analysis first.
         analysis = run_code_analysis(chunk)
-        # Build LLM prompt.
-        prompt = (
-            f"You are reviewing a code change chunk.\n\n"
-            f"Chunk:\n{chunk}\n\n"
-            f"Static analysis findings: {analysis.get('potential_issues')}\n\n"
-            "Provide a concise review comment (max 2 sentences) and give a severity level (info, warning, error)."
+        prompt = _CHUNK_PROMPT.format(
+            chunk=chunk,
+            findings=analysis.get("potential_issues", "(none)"),
         )
-        review = safe_llm_call(prompt, system_prompt=CODE_REVIEW_PROMPT, model_name="claude-3-5-sonnet")
+        review_text = safe_llm_call(
+            prompt,
+            system_prompt=CODE_REVIEW_PROMPT,
+            model_name="gemini-pro",
+            temperature=0.2,
+            max_output_tokens=256,
+        )
         chunk_reviews.append({
             "chunk": chunk,
             "analysis": analysis,
-            "review": review.strip(),
+            "review": review_text,
+            "severity": _extract_severity(review_text),
         })
-    return {**state, "chunk_reviews": chunk_reviews, "trace_span_kind": "code_review.review_chunks"}
+
+    return {
+        **state,
+        "chunk_reviews": chunk_reviews,
+        "trace_span_kind": "code_review.review_chunks",
+    }
+
 
 def aggregate_review(state: CodeReviewState) -> CodeReviewState:
-    """Step 3 – Aggregate chunk reviews into a final verdict using a higher‑capacity model.
-    Uses the "fusion" model that fuses multiple LLM outputs.
-    """
+    """Step 3 — gemini-1.5-pro fuses the per-chunk reviews into a verdict."""
     chunk_reviews = state.get("chunk_reviews", [])
-    combined = "\n---\n".join([cr["review"] for cr in chunk_reviews])
-    prompt = (
-        f"You are summarizing a PR review composed of multiple chunk comments.\n\n"
-        f"Chunk reviews:\n{combined}\n\n"
-        "Summarize the overall health of the PR, list any critical blockers, and output a final verdict string: \"approve\", \"request-changes\", or \"comment\"."
+    combined = "\n---\n".join(cr["review"] for cr in chunk_reviews)
+    prompt = _AGGREGATE_PROMPT.format(reviews=combined or "(no reviews)")
+
+    verdict_text = safe_llm_call(
+        prompt,
+        system_prompt=CODE_REVIEW_PROMPT,
+        model_name="gemini-pro",
+        temperature=0.2,
+        max_output_tokens=512,
     )
-    verdict = safe_llm_call(prompt, system_prompt=CODE_REVIEW_PROMPT, model_name="fusion")
-    return {**state, "final_verdict": verdict.strip(), "trace_span_kind": "code_review.aggregate"}
+
+    # Independent ground-truth blocker count from the per-chunk severities.
+    ground_truth_blockers = sum(
+        1 for cr in chunk_reviews if cr.get("severity") == "error"
+    )
+
+    return {
+        **state,
+        "final_verdict": _extract_verdict(verdict_text),
+        "blocker_count": ground_truth_blockers,
+        "trace_span_kind": "code_review.aggregate",
+    }
+
 
 def build_code_review_agent():
     graph = StateGraph(CodeReviewState)
@@ -76,4 +147,6 @@ def build_code_review_agent():
     graph.set_finish_point("aggregate")
     return graph.compile()
 
+
 agent = build_code_review_agent()
+create_agent = agent

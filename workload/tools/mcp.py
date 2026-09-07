@@ -27,6 +27,8 @@ so it works in the constrained execution environment of Claude Code.  It is
 thread‑safe for the typical single‑process orchestration model used by the
 project – concurrency is handled at the orchestration level, not inside the
 cache.
+
+Phoenix tracing is integrated to provide observability of cache operations.
 '''  # noqa: E501
 
 import json
@@ -36,6 +38,15 @@ import os
 import pathlib
 import threading
 from typing import Any, Optional
+
+# Phoenix tracing imports (graceful degradation if not available)
+try:
+    from phoenix.client import Client as PhoenixClient
+    import os
+    _phoenix_available = True
+except ImportError:
+    _phoenix_available = False
+    PhoenixClient = None  # type: ignore
 
 
 class MCPError(RuntimeError):
@@ -67,6 +78,13 @@ class MCP:
         # times thanks to ``exist_ok=True``.
         self.task_dir.mkdir(parents=True, exist_ok=True)
 
+        # Initialize Phoenix tracer if available
+        if _phoenix_available:
+            base_url = os.getenv("PHOENIX_BASE_URL", "http://localhost:6006")
+            self._phoenix = PhoenixClient(base_url=base_url)
+        else:
+            self._phoenix = None
+
     # ---------------------------------------------------------------------
     # Internal helpers
     # ---------------------------------------------------------------------
@@ -78,6 +96,49 @@ class MCP:
         safe_key = key.replace(os.sep, "_")
         return self.task_dir / f"{safe_key}.json"
 
+    def _trace_operation(self, operation: str, key: str = None, success: bool = True, error: str = None):
+        """Trace cache operations to Phoenix if available."""
+        if not self._phoenix:
+            return
+
+        try:
+            import uuid
+            import httpx
+
+            span_id = str(uuid.uuid4())
+            label = f"mcp_{operation}"
+            if key:
+                label += f"_{key}"
+
+            explanation = f"MCP {operation} operation"
+            if key:
+                explanation += f" on key '{key}'"
+            explanation += f" - {'success' if success else 'failed'}"
+            if error:
+                explanation += f": {error}"
+
+            # Make direct HTTP request to the correct endpoint for tracing
+            annotation_data = [{
+                "span_id": span_id,
+                "annotation_name": "mcp_operation",
+                "label": label,
+                "score": 1.0 if success else 0.0,
+                "explanation": explanation
+            }]
+
+            # Use the correct endpoint: /v1/span_annotations (not /v1/projects/{project}/span_annotations)
+            url = f"{self._phoenix.base_url}/v1/spans/annotations?sync=true"
+            response = httpx.post(
+                url,
+                json={"data": annotation_data},
+                timeout=5.0  # Shorter timeout for tracing to avoid blocking operations
+            )
+
+            # We don't need to check the response for tracing - just don't let it break the main operation
+        except Exception:
+            # Don't let tracing errors break the main operation
+            pass
+
     # ---------------------------------------------------------------------
     # Public API
     # ---------------------------------------------------------------------
@@ -88,17 +149,19 @@ class MCP:
         is written to a temporary location and then ``os.replace`` is used to
         move it into place.
         """
-        path = self._key_path(key)
-        tmp_path = path.with_suffix('.tmp')
         try:
+            path = self._key_path(key)
+            tmp_path = path.with_suffix('.tmp')
             data = json.dumps(value, ensure_ascii=False, indent=2)
-        except (TypeError, ValueError) as exc:
-            raise MCPError(f"value for key '{key}' is not JSON serialisable") from exc
-        # Write under lock to avoid race conditions if multiple threads try to
-        # write the same key simultaneously.
-        with self._global_lock, open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(data)
-        os.replace(tmp_path, path)
+            # Write under lock to avoid race conditions if multiple threads try to
+            # write the same key simultaneously.
+            with self._global_lock, open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(data)
+            os.replace(tmp_path, path)
+            self._trace_operation("set", key, success=True)
+        except Exception as exc:
+            self._trace_operation("set", key, success=False, error=str(exc))
+            raise
 
     # ---------------------------------------------------------------------
     # File system utilities (extended MCP functionality)
@@ -110,10 +173,13 @@ class MCP:
         Returns the file contents as a string.  Raises ``MCPError`` if the file
         does not exist or cannot be read.
         """
-        p = pathlib.Path(file_path)
         try:
-            return p.read_text(encoding="utf-8")
+            p = pathlib.Path(file_path)
+            content = p.read_text(encoding="utf-8")
+            self._trace_operation("read_file", file_path, success=True)
+            return content
         except Exception as exc:
+            self._trace_operation("read_file", file_path, success=False, error=str(exc))
             raise MCPError(f"cannot read file '{file_path}'") from exc
 
     def write_file(self, file_path: str, content: str) -> None:
@@ -414,18 +480,28 @@ class MCP:
         Returns ``default`` if the key does not exist.  Raises ``MCPError`` on JSON
         decode failures.
         """
-        path = self._key_path(key)
-        if not path.is_file():
-            return default
         try:
+            path = self._key_path(key)
+            if not path.is_file():
+                self._trace_operation("get", key, success=True, error="key not found")
+                return default
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError) as exc:
-            raise MCPError(f"failed to read cache key '{key}'") from exc
+                value = json.load(f)
+            self._trace_operation("get", key, success=True)
+            return value
+        except Exception as exc:
+            self._trace_operation("get", key, success=False, error=str(exc))
+            raise
 
     def exists(self, key: str) -> bool:
         """Return ``True`` if ``key`` is present in the cache."""
-        return self._key_path(key).is_file()
+        try:
+            result = self._key_path(key).is_file()
+            self._trace_operation("exists", key, success=True)
+            return result
+        except Exception as exc:
+            self._trace_operation("exists", key, success=False, error=str(exc))
+            raise
 
     def delete(self, key: str) -> None:
         """Remove ``key`` from the cache.  Silently succeeds if the key is
@@ -433,7 +509,9 @@ class MCP:
         """
         try:
             self._key_path(key).unlink()
+            self._trace_operation("delete", key, success=True)
         except FileNotFoundError:
+            self._trace_operation("delete", key, success=True, error="key not found")
             pass
 
     def clear(self) -> None:
@@ -447,7 +525,9 @@ class MCP:
                 for child in self.task_dir.iterdir():
                     child.unlink()
                 self.task_dir.rmdir()
+            self._trace_operation("clear", success=True)
         except Exception as exc:
+            self._trace_operation("clear", success=False, error=str(exc))
             raise MCPError(f"failed to clear cache for task '{self.task_id}'") from exc
 
     # ---------------------------------------------------------------------

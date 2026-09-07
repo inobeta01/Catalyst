@@ -1,21 +1,26 @@
 """Code writer agent: receives a task from triage and produces or patches code.
-It works in three steps:
-1️⃣ **fetch_task** – pulls the high‑level description and any existing source files from the MCP cache.
-2️⃣ **generate_patch** – uses a capable LLM (Claude 3.5 Sonnet) to produce a code snippet or diff.
-3️⃣ **apply_patch** – writes the generated file(s) to the repository and records the result back into the MCP cache.
 
-The agent is deliberately lightweight; it does not perform static analysis itself – that is left to the existing `run_code_analysis` tool for later stages if needed.
+Three LangGraph nodes, each backed by a concrete Gemini model:
+
+    fetch_task -> generate_patch -> apply_patch
+
+Step contracts:
+- ``fetch_task``:    MCP read, no LLM
+- ``generate_patch``(gemini-1.5-pro): produces a single file as JSON
+- ``apply_patch``:   writes the file + records it in MCP, no LLM
 """
 
+import json
+import pathlib
+from typing import Annotated, List, Optional, TypedDict
+
 from langgraph.graph import StateGraph
-from typing import TypedDict, Optional, List, Annotated
 from langgraph.graph.message import add_messages
 
-import json
-from workload.prompts.code_writer import CODE_WRITER_PROMPT
 from workload.llm import safe_llm_call
-from workload.tools import fetch_issue_context
+from workload.prompts.code_writer import CODE_WRITER_PROMPT
 from workload.tools.mcp import MCP  # shared cache implementation
+
 
 class CodeWriterState(TypedDict):
     messages: Annotated[List, add_messages]
@@ -26,66 +31,103 @@ class CodeWriterState(TypedDict):
 
 
 def fetch_task(state: CodeWriterState) -> CodeWriterState:
-    """Step 1 – pull the task description from the shared MCP cache.
+    """Step 1 — pull the task description from the shared MCP cache.
 
-    The triage agent stores its final classification under the key
-    ``triage_result``; we read it here. If the cache is empty we fall back to a
-    generic placeholder so the agent still runs (useful for manual testing).
+    The triage agent stores its final classification under ``triage_result``;
+    we read it here.  If the cache is empty we fall back to a placeholder so
+    the agent still runs (useful for manual testing).
     """
     issue_id = state.get("issue_id", "unknown")
-    # Use a dedicated MCP instance scoped to this run (the task_id can be the
-    # issue_id or any UUID the orchestrator provides).  For simplicity we reuse
-    # the issue_id.
     with MCP(task_id=issue_id) as cache:
         triage_result = cache.get("triage_result")
-    description = triage_result.get("description") if isinstance(triage_result, dict) else "Fix the reported issue"
-    return {**state, "description": description, "trace_span_kind": "code_writer.fetch_task"}
+    description = (
+        triage_result.get("description")
+        if isinstance(triage_result, dict)
+        else "Fix the reported issue"
+    )
+    return {
+        **state,
+        "description": description,
+        "trace_span_kind": "code_writer.fetch_task",
+    }
+
+
+_GENERATE_PROMPT = (
+    "Produce a single-file code patch that satisfies the task below.\n"
+    "Respond with one JSON object and nothing else:\n"
+    '{{"path": "<relative file path, e.g. module/file.py>", '
+    '"content": "<complete file contents as a JSON string>"}}\n\n'
+    "Task:\n{description}\n"
+)
+
+
+def _try_parse_json(text: str) -> Optional[dict]:
+    """Pull the first JSON object out of a model response."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Some models wrap JSON in ```json fences; strip them and retry.
+    if "```" in text:
+        fenced = text.split("```", 2)
+        if len(fenced) >= 3:
+            inner = fenced[1].lstrip("json").strip() if fenced[1].lstrip().startswith("json") else fenced[1]
+            try:
+                return json.loads(inner)
+            except json.JSONDecodeError:
+                pass
+    # Last resort: take the substring between the first { and the last }.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return None
 
 
 def generate_patch(state: CodeWriterState) -> CodeWriterState:
-    """Step 2 – ask an LLM to produce the code needed for the description.
-
-    The prompt asks for a **single file** with its relative path and full
-    content.  The LLM response is expected to be a JSON object:
-
-    ```json
-    {"path": "module/file.py", "content": "..."}
-    ```
-    """
+    """Step 2 — gemini-1.5-pro emits a single-file patch as JSON."""
     description = state.get("description", "")
-    prompt = f"{CODE_WRITER_PROMPT}\n\nTask description:\n{description}\n\nRespond with a JSON object containing the target file path (relative to the repository root) and the complete file content."
-    result = safe_llm_call(prompt, system_prompt=CODE_WRITER_PROMPT, model_name="claude-3-5-sonnet")
-    try:
-        generated = json.loads(result)
-    except Exception as exc:
-        # If parsing fails we store the raw LLM output for debugging.
-        generated = {"path": "debug_output.txt", "content": result}
-    return {**state, "generated_code": generated, "trace_span_kind": "code_writer.generate_patch"}
+    prompt = _GENERATE_PROMPT.format(description=description)
+
+    result_text = safe_llm_call(
+        prompt,
+        system_prompt=CODE_WRITER_PROMPT,
+        model_name="gemini-pro",
+        temperature=0.2,
+        max_output_tokens=2048,
+    )
+    parsed = _try_parse_json(result_text)
+    if parsed is None:
+        parsed = {"path": "debug_output.txt", "content": result_text}
+    return {
+        **state,
+        "generated_code": parsed,
+        "trace_span_kind": "code_writer.generate_patch",
+    }
 
 
 def apply_patch(state: CodeWriterState) -> CodeWriterState:
-    """Step 3 – write the generated file to disk and record it in the MCP cache.
+    """Step 3 — write the file to disk and record it in MCP."""
+    payload = state.get("generated_code") or {}
+    path = payload.get("path") if isinstance(payload, dict) else None
+    content = payload.get("content", "") if isinstance(payload, dict) else ""
 
-    The repository root is the current working directory (the orchestrator runs
-    from the project root).  After writing we store the same payload under the
-    key ``code_writer_result`` so downstream agents can read it.
-    """
-    payload = state.get("generated_code", {})
-    if not payload:
-        return {**state, "trace_span_kind": "code_writer.apply_patch"}
-    path = payload.get("path")
-    content = payload.get("content", "")
     if path:
-        # Ensure parent directories exist.
-        import os, pathlib
         full_path = pathlib.Path(path)
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")
-    # Write back to MCP for visibility.
+
     issue_id = state.get("issue_id", "unknown")
     with MCP(task_id=issue_id) as cache:
         cache.set("code_writer_result", payload)
-    return {**state, "trace_span_kind": "code_writer.apply_patch"}
+
+    return {
+        **state,
+        "trace_span_kind": "code_writer.apply_patch",
+    }
 
 
 def build_code_writer_agent():
@@ -98,6 +140,7 @@ def build_code_writer_agent():
     graph.add_edge("generate", "apply")
     graph.set_finish_point("apply")
     return graph.compile()
+
 
 # Exported compiled agent ready for the orchestration layer.
 agent = build_code_writer_agent()
