@@ -1,41 +1,14 @@
-CREATE TABLE IF NOT EXISTS runs (
-    -- Only what Phoenix doesn't own
+-- Enable required extension for gen_random_uuid()
+-- Note: Creating extensions requires superuser privileges. If the database role
+-- executing this schema lacks permission, ensure pgcrypto is pre-installed or
+-- use an alternative UUID generation method (e.g., uuid-ossp or application-layer).
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- Top-level run context
-CREATE TABLE runs (
-    id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    run_id              TEXT        NOT NULL UNIQUE,
-    run_type            TEXT        NOT NULL,           -- 'eval' | 'single' | 'smoke'
-    failure_mode_tag    TEXT,
-    agent_name          TEXT        NOT NULL,
-    fixture_path        TEXT        NOT NULL,
-    perturbation_id     UUID,
-    status              TEXT        NOT NULL DEFAULT 'pending',
-    started_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at        TIMESTAMPTZ,
-    duration_ms         INTEGER,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX idx_runs_run_id           ON runs (run_id);
-CREATE INDEX idx_runs_agent_name       ON runs (agent_name);
-CREATE INDEX idx_runs_failure_mode_tag ON runs (failure_mode_tag);
-
--- What was intentionally broken per run
-CREATE TABLE perturbations (
-    id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    run_id              TEXT        NOT NULL REFERENCES runs (run_id) ON DELETE CASCADE,
-    failure_mode_id     TEXT        NOT NULL REFERENCES failure_modes (id),
-    perturbation_fn     TEXT        NOT NULL,
-    args_applied        JSONB       NOT NULL DEFAULT '{}',
-    applied_at          TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX idx_perturbations_run_id          ON perturbations (run_id);
-CREATE INDEX idx_perturbations_failure_mode_id ON perturbations (failure_mode_id);
-
+-- ============================================================
 -- Failure mode catalog (from failure-modes/*.yaml)
-CREATE TABLE failure_modes (
+-- Must be created first because other tables reference it
+-- ============================================================
+CREATE TABLE IF NOT EXISTS failure_modes (
     id                  TEXT        PRIMARY KEY,
     description         TEXT        NOT NULL,
     agent_name          TEXT        NOT NULL,
@@ -50,8 +23,47 @@ CREATE TABLE failure_modes (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ============================================================
+-- Top-level run context
+-- ============================================================
+CREATE TABLE IF NOT EXISTS runs (
+    id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_id              TEXT        NOT NULL UNIQUE,
+    run_type            TEXT        NOT NULL,           -- 'eval' | 'single' | 'smoke'
+    failure_mode_tag    TEXT,
+    agent_name          TEXT        NOT NULL,
+    fixture_path        TEXT        NOT NULL,
+    perturbation_id     UUID,
+    status              TEXT        NOT NULL DEFAULT 'pending',
+    started_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at        TIMESTAMPTZ,
+    duration_ms         INTEGER,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_runs_run_id           ON runs (run_id);
+CREATE INDEX IF NOT EXISTS idx_runs_agent_name       ON runs (agent_name);
+CREATE INDEX IF NOT EXISTS idx_runs_failure_mode_tag ON runs (failure_mode_tag);
+
+-- ============================================================
+-- What was intentionally broken per run
+-- ============================================================
+CREATE TABLE IF NOT EXISTS perturbations (
+    id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_id              TEXT        NOT NULL REFERENCES runs (run_id) ON DELETE CASCADE,
+    failure_mode_id     TEXT        NOT NULL REFERENCES failure_modes (id),
+    perturbation_fn     TEXT        NOT NULL,
+    args_applied        JSONB       NOT NULL DEFAULT '{}',
+    applied_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_perturbations_run_id          ON perturbations (run_id);
+CREATE INDEX IF NOT EXISTS idx_perturbations_failure_mode_id ON perturbations (failure_mode_id);
+
+-- ============================================================
 -- Batch eval reports
-CREATE TABLE eval_results (
+-- ============================================================
+CREATE TABLE IF NOT EXISTS eval_results (
     id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     eval_batch_id       TEXT        NOT NULL UNIQUE,
     total_modes         INTEGER     NOT NULL,
@@ -65,8 +77,10 @@ CREATE TABLE eval_results (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ============================================================
 -- Per-failure-mode breakdown within a batch
-CREATE TABLE eval_result_rows (
+-- ============================================================
+CREATE TABLE IF NOT EXISTS eval_result_rows (
     id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     eval_batch_id       TEXT        NOT NULL REFERENCES eval_results (eval_batch_id) ON DELETE CASCADE,
     failure_mode_id     TEXT        NOT NULL REFERENCES failure_modes (id),
@@ -78,11 +92,13 @@ CREATE TABLE eval_result_rows (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_eval_result_rows_batch_id         ON eval_result_rows (eval_batch_id);
-CREATE INDEX idx_eval_result_rows_failure_mode_id  ON eval_result_rows (failure_mode_id);
+CREATE INDEX IF NOT EXISTS idx_eval_result_rows_batch_id        ON eval_result_rows (eval_batch_id);
+CREATE INDEX IF NOT EXISTS idx_eval_result_rows_failure_mode_id ON eval_result_rows (failure_mode_id);
 
+-- ============================================================
 -- Tool response record/replay for deterministic control runs
-CREATE TABLE replay_cache (
+-- ============================================================
+CREATE TABLE IF NOT EXISTS replay_cache (
     id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     cache_key           TEXT        NOT NULL UNIQUE,   -- SHA-256(tool_name + input_json)
     tool_name           TEXT        NOT NULL,
@@ -93,11 +109,13 @@ CREATE TABLE replay_cache (
     last_hit_at         TIMESTAMPTZ
 );
 
-CREATE INDEX idx_replay_cache_cache_key  ON replay_cache (cache_key);
-CREATE INDEX idx_replay_cache_tool_name  ON replay_cache (tool_name);
+CREATE INDEX IF NOT EXISTS idx_replay_cache_cache_key ON replay_cache (cache_key);
+CREATE INDEX IF NOT EXISTS idx_replay_cache_tool_name ON replay_cache (tool_name);
 
+-- ============================================================
 -- Internal doc index for corpus/sanitized/
-CREATE TABLE knowledge_base (
+-- ============================================================
+CREATE TABLE IF NOT EXISTS knowledge_base (
     id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     doc_id              TEXT        NOT NULL UNIQUE,
     agent_scope         TEXT,
@@ -111,10 +129,12 @@ CREATE TABLE knowledge_base (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_knowledge_base_agent_scope ON knowledge_base (agent_scope);
+CREATE INDEX IF NOT EXISTS idx_knowledge_base_agent_scope ON knowledge_base (agent_scope);
 
+-- ============================================================
 -- Versioned prompt history (required for prompt-drift failure mode)
-CREATE TABLE prompt_versions (
+-- ============================================================
+CREATE TABLE IF NOT EXISTS prompt_versions (
     id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     agent_name          TEXT        NOT NULL,
     prompt_key          TEXT        NOT NULL,
@@ -125,6 +145,5 @@ CREATE TABLE prompt_versions (
     UNIQUE (agent_name, prompt_key, version)
 );
 
-CREATE INDEX idx_prompt_versions_agent_name ON prompt_versions (agent_name);
-CREATE INDEX idx_prompt_versions_is_current ON prompt_versions (is_current);
-);
+CREATE INDEX IF NOT EXISTS idx_prompt_versions_agent_name ON prompt_versions (agent_name);
+CREATE INDEX IF NOT EXISTS idx_prompt_versions_is_current ON prompt_versions (is_current);

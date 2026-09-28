@@ -1,3 +1,7 @@
+# Package configuration for Catalyst CLI.
+# The CLI now uses task templates (workload/prompts/templates.py) for input
+# instead of external fixture JSON files. No additional runtime dependencies
+# are required beyond those already listed.
 from setuptools import setup, find_packages
 
 setup(

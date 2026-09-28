@@ -33,13 +33,13 @@ class CodeWriterState(TypedDict):
 def fetch_task(state: CodeWriterState) -> CodeWriterState:
     """Step 1 — pull the task description from the shared MCP cache.
 
-    The triage agent stores its final classification under ``triage_result``;
+    The triage agent stores its final classification under ``triage_output``;
     we read it here.  If the cache is empty we fall back to a placeholder so
     the agent still runs (useful for manual testing).
     """
     issue_id = state.get("issue_id", "unknown")
     with MCP(task_id=issue_id) as cache:
-        triage_result = cache.get("triage_result")
+        triage_result = cache.get("triage_output")
     description = (
         triage_result.get("description")
         if isinstance(triage_result, dict)
@@ -122,7 +122,7 @@ def apply_patch(state: CodeWriterState) -> CodeWriterState:
 
     issue_id = state.get("issue_id", "unknown")
     with MCP(task_id=issue_id) as cache:
-        cache.set("code_writer_result", payload)
+        cache.set("code_output", payload)
 
     return {
         **state,

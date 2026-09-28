@@ -1,34 +1,62 @@
-"""Phoenix client: read/write annotations, poll with timeout."""
+"""Thin wrapper around Phoenix SDK (20.3.0+) for verdict annotations."""
 
-import requests
-import time
+import os
+import logging
+import pandas as pd
+from phoenix.client import Client
+from phoenix.client.resources.spans import SpanAnnotationData
+
+logger = logging.getLogger(__name__)
 
 
-class PhoenixClient:
-    def __init__(self, base_url: str = "http://localhost:6006"):
-        self.base_url = base_url
+class VerdictTransport:
 
-    def get_annotations(self, trace_id: str):
-        """Fetch annotations for a trace."""
-        resp = requests.get(f"{self.base_url}/api/v1/traces/{trace_id}/annotations")
-        return resp.json() if resp.ok else {}
+    def __init__(self, base_url: str = None, project: str = "catalyst"):
+        self.base_url = base_url or os.getenv("PHOENIX_BASE_URL", "http://localhost:6006")
+        self.project = project
+        self._client = Client(base_url=self.base_url)
 
-    def add_annotation(self, trace_id: str, annotation: dict):
-        """Add an annotation to a trace."""
-        resp = requests.post(
-            f"{self.base_url}/api/v1/traces/{trace_id}/annotations",
-            json=annotation,
-        )
-        return resp.ok
+    def log_evaluation(
+        self,
+        span_id: str,
+        eval_name: str,
+        label: str,
+        score: float,
+        explanation: str,
+    ):
+        """Write verdict using Phoenix native log_span_annotations — no raw HTTP."""
+        try:
+            annotations = [
+                SpanAnnotationData(
+                    span_id=span_id,
+                    name=eval_name,
+                    annotator_kind="CODE",
+                    result={
+                        "label": label,
+                        "score": score,
+                        "explanation": explanation,
+                    },
+                )
+            ]
+            self._client.spans.log_span_annotations(
+                span_annotations=annotations,
+                sync=True,
+            )
+            logger.info("Verdict written for span %s: %s %.2f", span_id, label, score)
+        except Exception as exc:
+            logger.warning("Phoenix log_evaluation failed for span %s: %s", span_id, exc)
 
-    def poll_trace(self, trace_id: str, timeout: int = 60):
-        """Poll for a trace until it completes or timeout."""
-        start = time.time()
-        while time.time() - start < timeout:
-            resp = requests.get(f"{self.base_url}/api/v1/traces/{trace_id}")
-            if resp.ok:
-                trace = resp.json()
-                if trace.get("status", {}).get("state") == "COMPLETED":
-                    return trace
-            time.sleep(1)
-        raise TimeoutError(f"Trace {trace_id} did not complete within {timeout}s")
+    def get_evaluations(self, span_id: str, eval_name: str):
+        """Read back evaluations for a span."""
+        try:
+            df = self._client.spans.get_span_annotations_dataframe(
+                span_ids=[span_id],
+                project_identifier=self.project,
+                include_annotation_names=[eval_name] if eval_name else None,
+            )
+            if df is None or df.empty:
+                return None
+            return df
+        except Exception as exc:
+            logger.warning("Phoenix get_evaluations failed for span %s: %s", span_id, exc)
+            return None

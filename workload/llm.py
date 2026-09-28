@@ -8,7 +8,7 @@ already use.
 """
 import os
 from typing import Optional
-
+import time
 from dotenv import load_dotenv
 from google import genai
 from google.genai import errors as genai_errors
@@ -31,15 +31,15 @@ if not GEMINI_API_KEY:
 
 # Concrete aliases. Keep this list short and explicit — every agent picks one.
 GEMINI_MODEL_ALIASES: dict[str, str] = {
-    "gemini-fast": "gemini-1.5-flash",
-    "gemini-pro": "gemini-1.5-pro",
-    "gemini-2-flash": "gemini-2.0-flash",
-    "gemini-2-flash-lite": "gemini-2.0-flash-lite",
+    "gemini-fast": "gemini-3.8-flash",
+    "gemini-pro": "gemini-3.8-flash",
+    "gemini-2-flash": "gemini-3.8-flash",
+    "gemini-2-flash-lite": "gemini-3.8-flash",
     # Back‑compat aliases kept so existing call sites don't break silently.
-    "auto:fast": "gemini-1.5-flash",
-    "claude-3-5-sonnet": "gemini-1.5-pro",
-    "gpt-4o-mini": "gemini-1.5-flash",
-    "fusion": "gemini-1.5-pro",
+    "auto:fast": "gemini-3.8-flash",
+    "claude-3-5-sonnet": "gemini-3.8-flash",
+    "gpt-4o-mini": "gemini-3.8-flash",
+    "fusion": "gemini-3.8-flash",
 }
 
 
@@ -69,54 +69,69 @@ def safe_llm_call(
     prompt: str,
     system_prompt: Optional[str] = None,
     model_name: str = "gemini-fast",
-    fallback_model: str = "gemini-pro",
+    fallback_models: Optional[list[str]] = None,
     temperature: float = 0.4,
     max_output_tokens: int = 1024,
+    max_retries: int = 5,
+    backoff_seconds: int = 10,
 ) -> str:
-    """Call Gemini and return ``response.text``.
+    """Call Gemini, with exponential backoff and multiple fallbacks.
 
-    Errors are caught and a single retry against ``fallback_model`` is performed
-    before returning a safe stub — same shape as the old FreeLLM wrapper.
+    The call will attempt ``model_name`` up to ``max_retries`` times, sleeping
+    ``backoff_seconds`` between attempts.  If all attempts fail with a
+    ``503 UNAVAILABLE`` (or network errors), we sequentially fall back to the
+    provided ``fallback_models`` list.  If none succeed, a hard‑coded error
+    message is returned.
     """
     client = get_gemini_client()
     concrete = resolve_model_name(model_name)
+    fallback_models = fallback_models or ["gemini-pro", "gemini-fast"]
 
     config: dict = {
         "temperature": temperature,
         "max_output_tokens": max_output_tokens,
     }
-    contents: list = []
     if system_prompt:
-        # ``google-genai`` accepts system instructions via the config object.
         config["system_instruction"] = system_prompt
-    contents.append(prompt)
 
-    try:
-        response = client.models.generate_content(
-            model=concrete,
-            contents=contents,
-            config=config,
-        )
-        return (response.text or "").strip()
-    except genai_errors.APIError as err:
-        print(
-            f"[Gemini Warning] call to {concrete} failed: {err}. "
-            f"Retrying with fallback {fallback_model}."
-        )
-    except Exception as err:  # network / SDK failures
-        print(
-            f"[Gemini Warning] call to {concrete} raised {type(err).__name__}: {err}. "
-            f"Retrying with fallback {fallback_model}."
-        )
+    def _attempt(model: str) -> Optional[str]:
+        try:
+            chat = client.chats.create(
+                model=model,
+                config=config,
+            )
+            rsp = chat.send_message(prompt)
+            return (rsp.text or "").strip()
+        except genai_errors.APIError as err:
+            code = getattr(err, "code", None)
+            msg = getattr(err, "message", str(err))
+            # Treat 503 as transient
+            if code == 503:
+                return None
+            print(f"[Gemini Warning] call to {model} failed: {msg} (code {code}).")
+            return None
+        except Exception as err:
+            print(f"[Gemini Warning] call to {model} raised {type(err).__name__}: {err}.")
+            return None
 
-    try:
-        fallback_concrete = resolve_model_name(fallback_model)
-        response = client.models.generate_content(
-            model=fallback_concrete,
-            contents=contents,
-            config=config,
-        )
-        return (response.text or "").strip()
-    except Exception as err:
-        print(f"[Gemini Error] fallback {fallback_model} failed: {err}.")
-        return "Unable to generate LLM response due to provider unavailability."
+    # First try the primary model with retries
+    for i in range(max_retries):
+        result = _attempt(concrete)
+        if result:
+            return result
+        print(f"[Gemini Warning] retry {i+1}/{max_retries} for {concrete}.")
+        time.sleep(backoff_seconds)
+
+    # Fallback chain
+    for fb in fallback_models:
+        concrete_fb = resolve_model_name(fb)
+        for i in range(max_retries):
+            result = _attempt(concrete_fb)
+            if result:
+                return result
+            print(f"[Gemini Warning] retry {i+1}/{max_retries} for fallback {concrete_fb}.")
+            time.sleep(backoff_seconds)
+
+    # All attempts failed
+    print("[Gemini Error] All model attempts failed. Returning error stub.")
+    return "Unable to generate LLM response due to provider unavailability."

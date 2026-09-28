@@ -145,10 +145,17 @@ class MCP:
     def set(self, key: str, value: Any) -> None:
         """Store ``value`` under ``key``.
 
+        Supports legacy keys ``triage_result`` and ``code_writer_result`` for
+        backward compatibility – they are mapped to the new canonical names
+        ``triage_output`` and ``code_output``.
+
         The value must be JSON‑serialisable.  The operation is atomic – the file
         is written to a temporary location and then ``os.replace`` is used to
         move it into place.
         """
+        # Compatibility mapping
+        legacy_to_new = {"triage_result": "triage_output", "code_writer_result": "code_output"}
+        key = legacy_to_new.get(key, key)
         try:
             path = self._key_path(key)
             tmp_path = path.with_suffix('.tmp')
@@ -477,9 +484,15 @@ class MCP:
     def get(self, key: str, default: Any = None) -> Any:
         """Retrieve the value stored under ``key``.
 
+        Legacy keys ``triage_result`` and ``code_writer_result`` are automatically
+        mapped to the new ``triage_output`` and ``code_output`` identifiers.
+
         Returns ``default`` if the key does not exist.  Raises ``MCPError`` on JSON
         decode failures.
         """
+        # Compatibility mapping
+        legacy_to_new = {"triage_result": "triage_output", "code_writer_result": "code_output"}
+        key = legacy_to_new.get(key, key)
         try:
             path = self._key_path(key)
             if not path.is_file():

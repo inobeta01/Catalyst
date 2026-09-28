@@ -38,3 +38,4 @@ phoenix-data/
 
 # Corpus — raw real-world data never committed
 corpus/raw/
+.neon

@@ -27,10 +27,22 @@ class RedactionPipeline:
             self.patterns.append((name, pattern))
 
     def redact(self, text: str) -> str:
-        """Apply all redaction patterns to text."""
+        """Apply all redaction patterns to text, storing a map for reverse lookup.
+
+        Returns the redacted text. The map of placeholders to original values is stored
+        in ``self.redaction_map`` for the most recent call.
+        """
+        self.redaction_map = {}
         result = text
         for name, pattern in self.patterns:
-            result = re.sub(pattern, f"[REDACTED-{name.upper()}]", result)
+            def _repl(match):
+                original = match.group(0)
+                # deterministic placeholder using a short hash
+                h = hashlib.sha256(original.encode()).hexdigest()[:8]
+                placeholder = f"[REDACTED-{name.upper()}-{h}]"
+                self.redaction_map[placeholder] = original
+                return placeholder
+            result = re.sub(pattern, _repl, result)
         return result
 
     def process_file(self, raw_path: Path, out_path: Path):

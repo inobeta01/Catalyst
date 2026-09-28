@@ -1,6 +1,9 @@
-# Catalyst Requirements
+google-genai>=2.19.0
 
-# Core LLM & Agent Framework
+# Database and migrations
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
+
 langgraph>=0.2.0
 langchain>=0.2.0
 langchain-core>=0.2.0

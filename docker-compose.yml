@@ -1,5 +1,12 @@
+# docker-compose.yml
+# ---------------------------------------------------------------------------
+# Updated compose file for Catalyst
+# ---------------------------------------------------------------------------
+version: "3.9"  # Updated to a newer version to avoid the obsolete warning
 
-version: "3.8"
+# Load environment variables from a .env file (if present)
+env_file:
+  - .env
 
 services:
   phoenix:
@@ -14,7 +21,7 @@ services:
 
   agentops:
     # Official AgentOps image (placeholder – replace with actual tag if needed)
-    image: agentops/agentops:latest
+    image: python:3.11-slim
     ports:
       - "8000:8000"
     environment:
@@ -36,10 +43,8 @@ services:
 
   # Optional sandbox service – replace with your chosen runtime (e2b, Docker, etc.)
   sandbox:
-    image: your-sandbox-image:latest
+    image: python:3.11-slim
     environment:
       - SANDBOX_API_KEY=${SANDBOX_API_KEY}
+      - DATABASE_URL=${DATABASE_URL}
     # Expose ports or mount volumes as required by the sandbox implementation
-
-volumes:
-  phoenix-data:

@@ -59,7 +59,7 @@ def run_triage(state: AgencyState) -> AgencyState:
 
     # Store result in shared MCP cache so downstream agents can access it seamlessly
     with MCP(task_id=task_id) as cache:
-        cache.set("triage_result", {
+        cache.set("triage_output", {
             "initial_classification": sub_output.get("initial_classification"),
             "refined_classification": sub_output.get("refined_classification"),
             "description": issue_text,
@@ -91,7 +91,7 @@ def run_code_writer(state: AgencyState) -> AgencyState:
     # Persist result to MCP for downstream agents (e.g., brief writer)
     from workload.tools.mcp import MCP
     with MCP(task_id=task_id) as cache:
-        cache.set("code_writer_result", sub_output.get("generated_code"))
+        cache.set("code_output", sub_output.get("generated_code"))
 
     return {
         **state,
@@ -132,7 +132,7 @@ def run_brief_writer(state: AgencyState) -> AgencyState:
 
     # Brief writer agent can also read context from MCP cache if needed
     with MCP(task_id=task_id) as cache:
-        triage_data = cache.get("triage_result", {})
+        triage_data = cache.get("triage_output", {})
 
     # Simple stub execution for brief writer
     return {
