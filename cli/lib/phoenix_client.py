@@ -63,7 +63,10 @@ class VerdictTransport:
             logger.warning("Phoenix log_evaluation failed for span %s: %s", span_id, exc)
 
     def get_evaluations(self, span_id: str, eval_name: str):
-        """Read back evaluations for a span."""
+        """Read back evaluations for a span.
+
+        Returns a dict with label, score, explanation or None if no annotation found.
+        """
         try:
             df = self._client.spans.get_span_annotations_dataframe(
                 span_ids=[span_id],
@@ -72,7 +75,15 @@ class VerdictTransport:
             )
             if df is None or df.empty:
                 return None
-            return df
+            # Extract the first annotation's result fields
+            row = df.iloc[0]
+            return {
+                "label": row.get("result.label"),
+                "score": row.get("result.score"),
+                "explanation": row.get("result.explanation"),
+                "annotation_name": row.get("annotation_name"),
+                "annotator_kind": row.get("annotator_kind"),
+            }
         except Exception as exc:
             logger.warning("Phoenix get_evaluations failed for span %s: %s", span_id, exc)
             return None
