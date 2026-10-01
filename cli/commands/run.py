@@ -50,8 +50,8 @@ def run():
 
 def _invoke_agent(task_id: str, fixture_data: dict, run_id: str) -> str | None:
     """Invoke the orchestrator and return the root span ID."""
-    import opentelemetry.trace as otel_trace
     from opentelemetry import trace as otel_api
+    from opentelemetry.trace import format_span_id, get_current_span
     from workload.orchestration import agency_orchestrator
 
     # Prepare state for orchestration
@@ -62,11 +62,12 @@ def _invoke_agent(task_id: str, fixture_data: dict, run_id: str) -> str | None:
     }
     # Create an explicit OpenTelemetry span so we always have a valid span_id
     tracer = otel_api.get_tracer(__name__)
-    with tracer.start_as_current_span("orchestration"):
+    with tracer.start_as_current_span("orchestration") as span:
         agency_orchestrator.invoke(state)
-        ctx = otel_trace.get_current_span().get_span_context()
+        # Get the span ID from the active span context
+        ctx = span.get_span_context()
     # If the OpenTelemetry context didn't produce a valid span (e.g., no exporter),
     # fall back to the run identifier as the span ID so Phoenix still records a value.
     if not ctx.is_valid:
         return run_id
-    return format(ctx.span_id, "016x") if ctx.is_valid else None
+    return format_span_id(ctx.span_id)

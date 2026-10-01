@@ -1,10 +1,10 @@
-"""Thin wrapper around Phoenix SDK (20.3.0+) for verdict annotations."""
+"""Thin wrapper around Phoenix SDK (20.16.0+) for verdict annotations using the modern DataFrame API."""
 
 import os
 import logging
+import time
 import pandas as pd
 from phoenix.client import Client
-from phoenix.client.resources.spans import SpanAnnotationData
 
 logger = logging.getLogger(__name__)
 
@@ -24,26 +24,42 @@ class VerdictTransport:
         score: float,
         explanation: str,
     ):
-        """Write verdict using Phoenix native log_span_annotations — no raw HTTP."""
+        """Write verdict using Phoenix modern log_span_annotations_dataframe API.
+
+        Requires a DataFrame with span_id column. Falls back to warning if span doesn't exist.
+        Includes a retry with a short pause to handle batch exporter timing (404 = span not yet exported).
+        """
+        # Build DataFrame matching Phoenix's expected schema
+        df = pd.DataFrame([{
+            "span_id": span_id,
+            "name": eval_name,
+            "annotator_kind": "CODE",
+            "label": label,
+            "score": score,
+            "explanation": explanation,
+        }])
+
         try:
-            annotations = [
-                SpanAnnotationData(
-                    span_id=span_id,
-                    name=eval_name,
-                    annotator_kind="CODE",
-                    result={
-                        "label": label,
-                        "score": score,
-                        "explanation": explanation,
-                    },
-                )
-            ]
-            self._client.spans.log_span_annotations(
-                span_annotations=annotations,
+            self._client.spans.log_span_annotations_dataframe(
+                dataframe=df,
                 sync=True,
             )
             logger.info("Verdict written for span %s: %s %.2f", span_id, label, score)
         except Exception as exc:
+            # 404 = span not yet exported (batch processor delay)
+            # Retry once after a short pause to let the exporter flush
+            if "404" in str(exc):
+                time.sleep(1.5)
+                try:
+                    self._client.spans.log_span_annotations_dataframe(
+                        dataframe=df,
+                        sync=True,
+                    )
+                    logger.info("Verdict written (retry) for span %s: %s %.2f", span_id, label, score)
+                    return
+                except Exception as retry_exc:
+                    logger.warning("Phoenix log_evaluation retry failed for span %s: %s", span_id, retry_exc)
+            # Common issues: span_id not found (404), malformed DF, server unreachable
             logger.warning("Phoenix log_evaluation failed for span %s: %s", span_id, exc)
 
     def get_evaluations(self, span_id: str, eval_name: str):
