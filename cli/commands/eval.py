@@ -7,26 +7,46 @@ import json
 from pathlib import Path
 from cli.lib.trace_correlation import TraceCorrelator
 from cli.lib.phoenix_client import VerdictTransport
-from workload.prompts.templates import get_failure_config
+from workload.prompts.templates import TASK_TEMPLATES, get_failure_config
 from .run import _invoke_agent
 
 app = typer.Typer()
 
 @app.command()
 def cmd_eval(
-    task_id: str = typer.Option(..., help="Task identifier"),
-    fixture: str = typer.Option(..., help="Path to fixture JSON file"),
-    run_id: str = typer.Option(..., help="Run identifier"),
+    task_id: str = typer.Option(None, help="Task identifier (random if omitted)"),
+    fixture: str = typer.Option(None, help="Path to fixture JSON file (auto-generated if omitted)"),
+    run_id: str = typer.Option(None, help="Run identifier (auto-generated if omitted)"),
 ):
-    """Run a single task with a random chance of injecting its failure mode."""
-    # Load fixture
-    fixture_path = Path(fixture)
-    if not fixture_path.exists():
-        typer.echo(f"Fixture not found: {fixture}", err=True)
-        raise typer.Exit(code=1)
+    """Run a single task with a random chance of injecting its failure mode.
 
-    with open(fixture_path) as f:
-        fixture_data = json.load(f)
+    If --task-id is omitted, a random task is chosen from the catalog.
+    If --fixture is omitted, a fixture is generated from the task description.
+    If --run-id is omitted, a UUID is generated.
+    """
+    # Choose task randomly if not specified
+    if task_id is None:
+        task_id, task = random.choice(list(TASK_TEMPLATES.items()))
+    else:
+        task = TASK_TEMPLATES.get(task_id, {})
+
+    # Generate fixture if not provided
+    if fixture is None:
+        fixture_data = {"issue_text": task.get("description", "")}
+        fixture = f"auto:{task_id}"
+    else:
+        # Load fixture from file
+        fixture_path = Path(fixture)
+        if not fixture_path.exists():
+            typer.echo(f"Fixture not found: {fixture}", err=True)
+            raise typer.Exit(code=1)
+        with open(fixture_path) as f:
+            fixture_data = json.load(f)
+
+    # Generate run_id if not provided
+    if run_id is None:
+        import uuid
+        run_id = str(uuid.uuid4())
 
     # Randomly decide whether to trigger failure mode for this task
     failure_cfg = get_failure_config(task_id)
